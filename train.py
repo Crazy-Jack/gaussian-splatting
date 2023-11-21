@@ -12,21 +12,50 @@
 import os
 import torch
 from random import randint
+import numpy as np 
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
+import torchvision
 from scene import Scene, GaussianModel
+from scene.cameras import Camera
 from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+from matplotlib import pyplot as plt
+from os import makedirs
+from celluloid import Camera as PltCamera
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+
+def rot2d(angle):
+    return torch.tensor([
+        [torch.cos(angle), torch.sin(angle), torch.tensor(0)],
+       [-torch.sin(angle), torch.cos(angle), torch.tensor(0)],
+        [torch.tensor(0), torch.tensor(0), torch.tensor(1)]
+    ])
+
+def normalize(x):
+    return x / x.norm(dim=-1, keepdim=True)
+def look_at(eye, at, up):
+    z = normalize(eye - at)
+    x = normalize(torch.linalg.cross(up, z))
+    y = normalize(torch.linalg.cross(z, x))
+    rot = torch.stack([x, y, z]).T
+    trans = torch.tensor([x @ eye, y @ eye, z @ eye])
+    return rot, trans
+
+def show(tensor):
+    tensor = tensor.detach().permute(1, 2, 0)
+    out = tensor.cpu().numpy()
+    plt.imshow((out * 255).astype(np.uint8))
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
@@ -48,6 +77,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    fig = plt.figure()
+    camera_ = PltCamera(fig)
+
+    os.makedirs("training_inspection", exist_ok=True)
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -127,8 +160,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            
 
-def prepare_output_and_logger(args):    
+            # visualization
+            target_views = [6, 21, 63, 99]
+            if ((iteration % 100) == 0 or iteration == opt.iterations) and (iteration > 0):
+                views_cams = scene.getTrainCameras().copy()
+                render_path = os.path.join(scene.model_path, 'InTrainingInspection', "iter_{}".format(iteration), "renders")
+                makedirs(render_path, exist_ok=True)
+                # print(f"Inspection during training...")
+                    
+                for view_id in target_views:
+                    view = views_cams[view_id]
+                    
+                    rendering = render(view, gaussians, pipe, background)["render"]
+                    torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(view_id) + ".png"))
+                    
+
+            
+def prepare_output_and_logger(args): 
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
@@ -197,8 +247,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1_000, 7_000, 20_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1_000, 7_000, 20_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
